@@ -14,27 +14,36 @@ if not NTFY_TOPIC or not WIDGET_URL:
 seen_messages = set()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
+    print("⏳ Launching browser...")
+    browser = p.chromium.launch(headless=True, args=[
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+    ])
     page = browser.new_page()
     page.goto(WIDGET_URL)
-
-    print("✅ Browser launched and widget loaded")
+    print("✅ Widget page loaded")
 
     while True:
-        # Grab all chat messages
-        messages = page.eval_on_selector_all(
-            ".sl-chat-message",
-            "elements => elements.map(e => e.textContent)"
-        )
+        try:
+            # Grab all chat messages
+            messages = page.eval_on_selector_all(
+                ".sl-chat-message",
+                "elements => elements.map(e => e.textContent)"
+            )
 
-        for msg in messages:
-            if msg not in seen_messages:
-                seen_messages.add(msg)
-                # Send to ntfy
-                try:
-                    requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg)
-                    print("💬 Sent to ntfy:", msg)
-                except Exception as e:
-                    print("❌ Error sending to ntfy:", e)
+            for msg in messages:
+                if msg not in seen_messages:
+                    seen_messages.add(msg)
+                    # Send to ntfy
+                    try:
+                        requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg)
+                        print("💬 Sent to ntfy:", msg)
+                    except Exception as e:
+                        print("❌ Error sending to ntfy:", e)
 
-        time.sleep(1)
+            time.sleep(1)
+        except Exception as e:
+            print("❌ Error scraping messages:", e)
+            time.sleep(3)

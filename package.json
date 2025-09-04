@@ -1,6 +1,7 @@
 {
   "name": "streamlabs-ntfy",
   "version": "1.0.0",
+  "description": "Forward Streamlabs chat messages to ntfy",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

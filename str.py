@@ -1,4 +1,3 @@
-import os
 import asyncio
 import requests
 import time
@@ -6,17 +5,16 @@ from playwright.async_api import async_playwright
 
 # ================= CONFIG =================
 CHAT_URL = os.getenv("CHAT_URL")  # replace with your widget
-NTFY_URL = os.getenv("NTFY_URL")  # replace with your ntfy topic
-SEND_DELAY = 5          # seconds between sending each queued message
-DEDUP_WINDOW = 5        # seconds to suppress duplicate messages
-MAX_LEN = 123           # chunk length before splitting
+NTFY_URL = os.getenv("NTFY_URL") # replace with your ntfy topic
+SEND_DELAY = 5
+DEDUP_WINDOW = 5
+MAX_LEN = 123
 
-# simple dedup store and send queue
-recent_msgs = {}        # { key: timestamp }
+recent_msgs = {}
 send_queue = asyncio.Queue()
 
 
-# ---------- Enqueue (with dedup + splitting) ----------
+# ---------- Enqueue (dedup + split) ----------
 async def enqueue_message(platform: str, user: str, message: str):
     now = time.time()
     key = f"{platform}:{user}:{message}"
@@ -39,7 +37,7 @@ async def enqueue_message(platform: str, user: str, message: str):
         await send_queue.put((platform, user, chunk + suffix))
 
 
-# ---------- Worker ----------
+# ---------- ntfy worker ----------
 async def ntfy_worker():
     while True:
         platform, user, msg = await send_queue.get()
@@ -52,7 +50,7 @@ async def ntfy_worker():
             )
             print(f"✅ Sent to ntfy: [{platform}] {user}: {msg}")
         except Exception as e:
-            print(f"❌ Failed to send to ntfy: {e}")
+            print(f"❌ Failed to send: {e}")
         await asyncio.sleep(SEND_DELAY)
         send_queue.task_done()
 
@@ -61,7 +59,7 @@ async def ntfy_worker():
 async def run_browser():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=True,   # MUST be headless for Railway
             args=[
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
@@ -69,16 +67,19 @@ async def run_browser():
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-accelerated-2d-canvas",
+                "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-blink-features=AutomationControlled",
+                "--window-size=1280,800",
             ],
         )
         page = await browser.new_page()
+        await page.set_viewport_size({"width": 1280, "height": 800})
         await page.goto(CHAT_URL, wait_until="domcontentloaded")
 
         try:
             await page.wait_for_selector("#log", timeout=30000)
         except Exception:
-            print("❌ #log not found; widget may not have loaded.")
+            print("❌ #log not found, chat widget may not have loaded.")
 
         print("📡 Chat widget loaded — attaching observer...")
 
@@ -86,7 +87,7 @@ async def run_browser():
             user = payload.get("user", "Unknown")
             message = payload.get("message", "")
             platform = payload.get("platform", "Facebook")
-            if message.strip():
+            if message and message.strip():
                 await enqueue_message(platform, user, message)
 
         await page.expose_binding("onNewMessage", on_new_message)
@@ -101,7 +102,7 @@ async def run_browser():
                         if (child.nodeType === Node.TEXT_NODE) {
                             parts.push(child.textContent);
                         } else if (child.nodeType === 1) {
-                            if (child.classList.contains('emote')) {
+                            if (child.classList && child.classList.contains('emote')) {
                                 const img = child.querySelector('img') || child;
                                 if (img) {
                                     let alt = (img.alt || '').trim();
@@ -134,16 +135,21 @@ async def run_browser():
                 }
 
                 function processNode(node) {
-                    if (!node || !node.dataset || !node.dataset.from) return;
-                    const user = node.dataset.from;
-                    const msgNode = node.querySelector('.message');
-                    const msg = extractMessage(msgNode);
-                    const platform = detectPlatform(node);
-                    if (msg) window.onNewMessage({user, message: msg, platform});
+                    try {
+                        if (!node || node.nodeType !== 1 || !node.dataset?.from) return;
+                        const user = node.dataset.from;
+                        const msgNode = node.querySelector('.message');
+                        const msg = extractMessage(msgNode);
+                        const platform = detectPlatform(node);
+                        if (msg) window.onNewMessage({ user, message: msg, platform });
+                    } catch (e) {}
                 }
 
                 const log = document.querySelector('#log');
-                if (!log) return;
+                if (!log) {
+                    console.log('#log not found');
+                    return;
+                }
 
                 log.querySelectorAll('div[data-from]').forEach(processNode);
 
@@ -163,7 +169,7 @@ async def run_browser():
         await asyncio.Future()
 
 
-# ---------- Main ----------
+# ---------- main ----------
 async def main():
     worker = asyncio.create_task(ntfy_worker())
     try:

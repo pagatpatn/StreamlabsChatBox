@@ -1,11 +1,12 @@
+import os
 import asyncio
 import requests
 import time
 from playwright.async_api import async_playwright
 
 # ================= CONFIG =================
-CHAT_URL = "https://streamlabs.com/widgets/chat-box/v1/YOUR_WIDGET_ID"  # replace with your widget
-NTFY_URL = "https://ntfy.sh/streamchats123"  # replace with your ntfy topic
+CHAT_URL = os.getenv("CHAT_URL")  # replace with your widget
+NTFY_URL = os.getenv("NTFY_URL")  # replace with your ntfy topic
 SEND_DELAY = 5          # seconds between sending each queued message
 DEDUP_WINDOW = 5        # seconds to suppress duplicate messages
 MAX_LEN = 123           # chunk length before splitting

@@ -1,7 +1,7 @@
 # Base image
 FROM python:3.13-slim
 
-# Install minimal dependencies for Chromium + Playwright
+# Install dependencies for Chromium + build tools
 RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y \
     libgbm1 \
     wget \
     unzip \
+    build-essential \
+    python3-dev \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,8 +34,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Chromium + dependencies for Playwright
-RUN playwright install --with-deps chromium
+# Install Chromium + Playwright dependencies
+RUN playwright install chromium
 
 # Copy the chat capture script
 COPY str.py .

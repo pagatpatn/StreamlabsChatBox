@@ -1,5 +1,5 @@
 playwright==1.43.0
 requests
-greenlet==2.0.2
+# remove greenlet pin, Playwright will install greenlet==3.0.3 automatically
 pyee==11.1.0
 typing-extensions

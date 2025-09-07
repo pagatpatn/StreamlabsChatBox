@@ -1,6 +1,7 @@
 import asyncio
 import requests
 import time
+import hashlib
 from playwright.async_api import async_playwright
 
 # ================= CONFIG =================
@@ -9,33 +10,30 @@ NTFY_URL = "https://ntfy.sh/streamchats123"
 SEND_DELAY = 5
 DEDUP_WINDOW = 5
 MAX_LEN = 123
-POLL_INTERVAL = 0.5  # seconds
+POLL_INTERVAL = 0.5
 
-recent_msgs = {}
+recent_msgs = {}      # { hash_key: timestamp }
 send_queue = asyncio.Queue()
 
-# ---------- Enqueue with dedup + splitting ----------
+# ---------- Enqueue ----------
 async def enqueue_message(platform: str, user: str, message: str):
+    key_hash = hashlib.sha256(f"{platform}:{user}:{message}".encode()).hexdigest()
     now = time.time()
-    key = f"{platform}:{user}:{message}"
-    if key in recent_msgs and now - recent_msgs[key] < DEDUP_WINDOW:
+    if key_hash in recent_msgs and now - recent_msgs[key_hash] < DEDUP_WINDOW:
         return
-    recent_msgs[key] = now
+    recent_msgs[key_hash] = now
+    # cleanup
     for k in list(recent_msgs.keys()):
         if now - recent_msgs[k] > DEDUP_WINDOW:
             del recent_msgs[k]
 
-    if len(message) <= MAX_LEN:
-        chunks = [message]
-    else:
-        chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)]
-
+    chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)] if len(message) > MAX_LEN else [message]
     total = len(chunks)
     for idx, chunk in enumerate(chunks, start=1):
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         await send_queue.put((platform, user, chunk + suffix))
 
-# ---------- Worker that POSTs to ntfy ----------
+# ---------- NTFY worker ----------
 async def ntfy_worker():
     while True:
         platform, user, msg = await send_queue.get()
@@ -46,13 +44,13 @@ async def ntfy_worker():
                 data=msg.encode("utf-8"),
                 headers={"Title": f"[{platform}] {user}"}
             )
-            print(f"✅ Sent to ntfy: [{platform}] {user}: {msg}")
+            print(f"✅ Sent: [{platform}] {user}: {msg}")
         except Exception as e:
-            print(f"❌ Failed to send to ntfy: {e}")
+            print(f"❌ Failed: {e}")
         await asyncio.sleep(SEND_DELAY)
         send_queue.task_done()
 
-# ---------- Browser + DOM observer + polling ----------
+# ---------- Browser ----------
 async def run_browser():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -66,13 +64,12 @@ async def run_browser():
         try:
             await page.wait_for_selector("#log", timeout=30000)
         except Exception:
-            print("❌ #log not found within timeout; widget might not have loaded.")
+            print("❌ #log not found within timeout")
 
-        print("📡 Chat widget loaded — attaching observer + starting polling...")
+        print("📡 Chat widget loaded — observer + polling active")
 
         async def on_new_message(user, message, platform):
-            if message and message.strip():
-                await enqueue_message(platform, user, message)
+            await enqueue_message(platform, user, message)
 
         await page.expose_binding("onNewMessage", lambda _, payload: on_new_message(
             payload.get("user", "Unknown"),
@@ -80,32 +77,22 @@ async def run_browser():
             payload.get("platform", "Kick")
         ))
 
-        # --- Track seen nodes for polling ---
-        seen_nodes = set()
+        seen_hashes = set()
 
-        # --- Inject JS for MutationObserver ---
         await page.evaluate("""
             (() => {
-                function safeNameFromUrl(url) {
-                    try { return url.split('/').pop().split('?')[0].split('.')[0].replace(/[^a-zA-Z0-9_-]+/g, ''); }
-                    catch (e) { return 'EMOTE'; }
-                }
-
                 function extractMessage(node) {
                     if (!node) return '';
                     const parts = [];
-                    node.childNodes.forEach(child => {
-                        if (child.nodeType === Node.TEXT_NODE) parts.push(child.textContent);
-                        else if (child.nodeType === 1) {
-                            if (child.classList && child.classList.contains('emote')) {
-                                const img = child.querySelector('img');
-                                if (img) parts.push(img.alt?.trim() || ':KEKW:');
-                            } else parts.push(child.textContent || '');
-                        }
+                    node.childNodes.forEach(c => {
+                        if (c.nodeType === Node.TEXT_NODE) parts.push(c.textContent);
+                        else if (c.nodeType === 1 && c.classList.contains('emote')) {
+                            const img = c.querySelector('img'); 
+                            parts.push(img?.alt?.trim() || ':KEKW:');
+                        } else parts.push(c.textContent || '');
                     });
                     return parts.join('').trim();
                 }
-
                 function detectPlatform(node) {
                     if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
                     if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
@@ -113,55 +100,48 @@ async def run_browser():
                     if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
                     return "Facebook";
                 }
-
-                function processNode(node) {
-                    try {
-                        if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
-                        const user = node.dataset.from;
-                        const msgNode = node.querySelector('.message');
-                        const msg = extractMessage(msgNode);
-                        const platform = detectPlatform(node);
-                        if (msg) window.onNewMessage({user, message: msg, platform});
-                    } catch(e) {}
-                }
-
                 const log = document.querySelector('#log');
                 if (!log) return;
-                log.querySelectorAll('div[data-from]').forEach(processNode);
-
                 const observer = new MutationObserver(muts => {
-                    muts.forEach(m => m.addedNodes.forEach(n => processNode(n)));
+                    muts.forEach(m => m.addedNodes.forEach(n => {
+                        try {
+                            if (!n.dataset || !n.dataset.from) return;
+                            const user = n.dataset.from;
+                            const msgNode = n.querySelector('.message');
+                            const msg = extractMessage(msgNode);
+                            const platform = detectPlatform(n);
+                            if (msg) window.onNewMessage({user, message: msg, platform});
+                        } catch(e){}
+                    }));
                 });
-                observer.observe(log, { childList: true });
+                observer.observe(log, {childList: true});
             })();
         """)
 
-        # --- Polling loop for backup (catches missed Kick messages) ---
+        # --- Polling backup ---
         while True:
             nodes = await page.query_selector_all("div[data-from]")
             for node in nodes:
-                node_id = await node.get_attribute("data-id") or str(id(node))
-                if node_id in seen_nodes:
-                    continue
-                seen_nodes.add(node_id)
-
                 user = await node.get_attribute("data-from") or "Unknown"
                 msg_node = await node.query_selector(".message") or await node.query_selector(".message-text")
-                if msg_node:
-                    message = await msg_node.inner_text()
-                    platform = "Kick"
-                    icons = await node.query_selector_all("img.platform-icon")
-                    for icon in icons:
-                        src = await icon.get_attribute("src") or ""
-                        if "youtube" in src: platform = "YouTube"
-                        elif "twitch" in src: platform = "Twitch"
-                        elif "facebook" in src: platform = "Facebook"
+                message = await msg_node.inner_text() if msg_node else ""
+                platform = "Kick"
+                icons = await node.query_selector_all("img.platform-icon")
+                for icon in icons:
+                    src = await icon.get_attribute("src") or ""
+                    if "youtube" in src: platform = "YouTube"
+                    elif "twitch" in src: platform = "Twitch"
+                    elif "facebook" in src: platform = "Facebook"
 
+                # generate hash to prevent duplicate sending
+                key_hash = hashlib.sha256(f"{platform}:{user}:{message}".encode()).hexdigest()
+                if key_hash not in seen_hashes:
+                    seen_hashes.add(key_hash)
                     await on_new_message(user, message, platform)
 
             await asyncio.sleep(POLL_INTERVAL)
 
-# ---------- main ----------
+# ---------- Main ----------
 async def main():
     worker = asyncio.create_task(ntfy_worker())
     try:

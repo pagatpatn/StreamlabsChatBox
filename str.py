@@ -11,7 +11,6 @@ SEND_DELAY = 5          # seconds between sending each queued message
 DEDUP_WINDOW = 5        # seconds to suppress duplicate messages
 MAX_LEN = 123           # chunk length before splitting
 
-# simple dedup store and send queue
 recent_msgs = {}        # { key: timestamp }
 send_queue = asyncio.Queue()
 
@@ -62,7 +61,6 @@ async def ntfy_worker():
 # ---------- Browser + DOM observer ----------
 async def run_browser():
     async with async_playwright() as p:
-        # Headless mode for Railway
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -91,17 +89,10 @@ async def run_browser():
 
         await page.expose_binding("onNewMessage", on_new_message)
 
+        # ---------------- JS injection ----------------
         await page.evaluate(
             """
             (() => {
-                function safeNameFromUrl(url) {
-                    try {
-                        const last = url.split('/').pop().split('?')[0];
-                        const base = last.split('.')[0] || 'EMOTE';
-                        return base.replace(/[^a-zA-Z0-9_-]+/g, '');
-                    } catch (e) { return 'EMOTE'; }
-                }
-
                 function extractMessage(node) {
                     if (!node) return '';
                     const parts = [];
@@ -124,12 +115,12 @@ async def run_browser():
                     return parts.join('').trim();
                 }
 
+                // ===== MODIFIED: detect Kick reliably =====
                 function detectPlatform(node) {
-                    if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
                     if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
                     if (node.querySelector("img.platform-icon[src*='twitch']")) return "Twitch";
                     if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
-                    return "Facebook";
+                    return "Kick";  // default to Kick if none of the above
                 }
 
                 function processNode(node) {

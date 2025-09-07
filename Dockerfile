@@ -1,35 +1,35 @@
-# Use Python base
-FROM python:3.13-slim
+FROM python:3.11-slim
 
-# Install system dependencies for Playwright + Chromium
+# Install system deps for Chromium
 RUN apt-get update && apt-get install -y \
     wget \
+    curl \
+    unzip \
     libnss3 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
     libxkbcommon0 \
+    libgtk-3-0 \
+    libdrm2 \
     libxcomposite1 \
     libxdamage1 \
     libxfixes3 \
     libxrandr2 \
     libgbm1 \
     libasound2 \
-    libpangocairo-1.0-0 \
-    libpango-1.0-0 \
-    libcairo2 \
+    libxshmfence1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python deps
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Set working dir
+WORKDIR /app
 
-# Install Playwright browsers (Chromium only to save space)
+# Copy files
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright browsers (Chromium only, headless)
 RUN playwright install --with-deps chromium
 
-# Copy app
-COPY . /app
-WORKDIR /app
+COPY . .
 
 CMD ["python", "str.py"]

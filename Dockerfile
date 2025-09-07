@@ -4,13 +4,14 @@
 FROM python:3.12-slim
 
 # --------------------------
-# Install system dependencies
+# Install system dependencies for Playwright
 # --------------------------
 RUN apt-get update && \
     apt-get install -y \
-        gcc \
-        g++ \
         curl \
+        wget \
+        unzip \
+        gnupg \
         libnss3 \
         libatk1.0-0 \
         libatk-bridge2.0-0 \
@@ -24,8 +25,19 @@ RUN apt-get update && \
         libpango-1.0-0 \
         libpangocairo-1.0-0 \
         libgtk-3-0 \
-        wget \
-        unzip \
+        libasound2 \
+        libxcb1 \
+        libx11-xcb1 \
+        libxss1 \
+        libxtst6 \
+        libxext6 \
+        libxrender1 \
+        libxfixes3 \
+        libxcursor1 \
+        libxi6 \
+        libc6 \
+        gcc \
+        g++ \
         && rm -rf /var/lib/apt/lists/*
 
 # --------------------------
@@ -37,14 +49,13 @@ WORKDIR /app
 # Copy requirements and install Python packages
 # --------------------------
 COPY requirements.txt .
-# Force greenlet to 3.0.3 (compatible with Python 3.12)
 RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
 # --------------------------
-# Install Playwright browsers
+# Install Playwright browsers and dependencies
 # --------------------------
-RUN playwright install
+RUN playwright install --with-deps
 
 # --------------------------
 # Copy your application code
@@ -54,4 +65,4 @@ COPY . .
 # --------------------------
 # Set entrypoint
 # --------------------------
-CMD ["python", "main.py"]
+CMD ["python", "str.py"]

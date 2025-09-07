@@ -1,151 +1,182 @@
 import os
 import asyncio
 import requests
-import math
 from playwright.async_api import async_playwright
 
-# =====================================================
-# --- Config (use Railway ENV vars for security) ---
-# =====================================================
-CHAT_URL = os.getenv("CHAT_URL")  # must be set in Railway
-NTFY_URL = os.getenv("NTFY_URL", "https://ntfy.sh/streamchats123")
-DEDUP_CACHE_SIZE = 20  # keep last 20 messages for spam filtering
-MAX_LEN = 123  # max chars per ntfy message
-SEND_DELAY = 5  # seconds between each message to ntfy
+# ==============================
+# Config
+# ==============================
+NTFY_URL = os.getenv("NTFY_URL")
+KICK_CHAT_URL = os.getenv("KICK_CHAT_URL")       # Kick chat embed
+YOUTUBE_CHAT_URL = os.getenv("YOUTUBE_CHAT_URL") # YouTube live chat embed
+FB_WIDGET_URL = os.getenv("FB_WIDGET_URL")       # Streamlabs/Facebook widget
 
-recent_msgs = []
+# Track seen messages to avoid duplicates
+seen_messages = set()
 
-
-async def send_to_ntfy(user, message, platform="Chat"):
-    """Send message(s) to ntfy with dedup + splitting + delay"""
-    global recent_msgs
-    key = f"{user}:{message}"
-
-    if key in recent_msgs:
+# ==============================
+# Helpers
+# ==============================
+async def send_to_ntfy(message: str):
+    """Send chat message to ntfy with 5s delay."""
+    if not NTFY_URL:
+        print("❌ NTFY_URL not set")
         return
+    try:
+        requests.post(NTFY_URL, data=message.encode("utf-8"))
+        print(f"✅ Sent to ntfy: {message}")
+    except Exception as e:
+        print(f"❌ Failed to send message: {e}")
+    await asyncio.sleep(5)
 
-    recent_msgs.append(key)
-    if len(recent_msgs) > DEDUP_CACHE_SIZE:
-        recent_msgs.pop(0)
+def format_kick(username: str, parts):
+    """Convert Kick message parts into string with emote fallback."""
+    final = []
+    for p in parts:
+        if isinstance(p, str):
+            final.append(p)
+        else:
+            alt = p.get("alt") or "EMOTE"
+            final.append(f":{alt.strip(':')}:")
+    return f"[Kick] {username}: {''.join(final)}"
 
-    # Split long messages
-    if len(message) <= MAX_LEN:
-        chunks = [message]
-    else:
-        chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)]
+def format_youtube(username: str, text: str):
+    return f"[YouTube] {username}: {text}"
 
-    total_parts = len(chunks)
+def format_facebook(username: str, text: str):
+    return f"[Facebook] {username}: {text}"
 
-    for i, chunk in enumerate(chunks, start=1):
-        suffix = f" [{i}/{total_parts}]" if total_parts > 1 else ""
-        try:
-            requests.post(
-                NTFY_URL,
-                data=(chunk + suffix).encode("utf-8"),
-                headers={"Title": f"[{platform}] {user}"}
-            )
-            print(f"✅ Sent to ntfy: [{platform}] {user}: {chunk}{suffix}")
-        except Exception as e:
-            print(f"❌ Failed to send to ntfy: {e}")
+# ==============================
+# Scrapers
+# ==============================
+async def scrape_kick(page):
+    messages = await page.evaluate("""() => {
+        const items = [];
+        document.querySelectorAll('[data-chat-entry]').forEach(el => {
+            const userEl = el.querySelector('[data-chat-entry-username]');
+            const msgEl = el.querySelector('[data-chat-entry-message]');
+            if (!userEl || !msgEl) return;
 
-        # Wait SEND_DELAY seconds between all messages (split or not)
-        await asyncio.sleep(SEND_DELAY)
-
-
-async def run():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,  # must be True for Railway
-            args=[
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-software-rasterizer"
-            ]
-        )
-        page = await browser.new_page()
-        await page.goto(CHAT_URL)
-
-        print("📡 Capturing chat messages from #log...")
-
-        async def on_message(_, data):
-            user = data.get("user", "Unknown")
-            message = data.get("message", "")
-            platform = data.get("platform", "Chat")
-            if message.strip():
-                await send_to_ntfy(user, message, platform)
-
-        await page.expose_binding("onNewMessage", on_message)
-
-        # JS observer: capture messages + fallback emote handling
-        await page.evaluate(r"""
-            const log = document.querySelector('#log');
-            if (log) {
-                function extractMessage(node) {
-                    let parts = [];
-                    node.querySelectorAll('.message *').forEach(el => {
-                        if (el.tagName === "IMG" && el.classList.contains("emote")) {
-                            // Try fallback text from alt or filename
-                            let alt = el.getAttribute("alt") || "";
-                            if (!alt) {
-                                let src = el.getAttribute("src") || "";
-                                let match = src.match(/\/([^\/]+)\.[a-z]+$/i);
-                                alt = match ? match[1] : "emote";
-                            }
-                            parts.push(`:${alt.toUpperCase()}:`);
-                        } else {
-                            parts.push(el.textContent);
-                        }
-                    });
-                    // If no nested children, fallback to textContent
-                    if (parts.length === 0) {
-                        parts.push(node.querySelector('.message')?.innerText.trim() || "");
+            const username = userEl.textContent.trim();
+            const parts = [];
+            msgEl.childNodes.forEach(node => {
+                if (node.nodeType === Node.TEXT_NODE) {
+                    parts.push(node.textContent);
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                    if (node.tagName === "IMG" && node.alt) {
+                        parts.push({alt: node.alt});
+                    } else {
+                        parts.push(node.textContent);
                     }
-                    return parts.join(" ").trim();
                 }
+            });
 
-                // Capture existing messages
-                log.querySelectorAll('div[data-from]').forEach(node => {
-                    const user = node.dataset.from;
-                    const msg = extractMessage(node);
-                    let platform = "Facebook"; // default
-                    if (node.querySelector("img.platform-icon[src*='kick']")) platform = "Kick";
-                    if (node.querySelector("img.platform-icon[src*='youtube']")) platform = "YouTube";
-                    if (node.querySelector("img.platform-icon[src*='twitch']")) platform = "Twitch";
-                    if (msg) window.onNewMessage({user, message: msg, platform});
-                });
+            items.push({
+                id: el.getAttribute("data-id"),
+                username,
+                parts
+            });
+        });
+        return items;
+    }""")
 
-                // Observe new messages
-                const observer = new MutationObserver(muts => {
-                    for (const m of muts) {
-                        for (const node of m.addedNodes) {
-                            if (node.nodeType === 1 && node.dataset.from) {
-                                const user = node.dataset.from;
-                                const msg = extractMessage(node);
-                                let platform = "Facebook"; // default
-                                if (node.querySelector("img.platform-icon[src*='kick']")) platform = "Kick";
-                                if (node.querySelector("img.platform-icon[src*='youtube']")) platform = "YouTube";
-                                if (node.querySelector("img.platform-icon[src*='twitch']")) platform = "Twitch";
-                                if (msg) window.onNewMessage({user, message: msg, platform});
-                            }
-                        }
-                    }
-                });
-                observer.observe(log, { childList: true });
-                console.log("✅ Chat observer attached to #log");
-            } else {
-                console.log("❌ #log not found");
-            }
-        """)
+    results = []
+    for msg in messages:
+        if msg["id"] in seen_messages:
+            continue
+        seen_messages.add(msg["id"])
+        results.append(format_kick(msg["username"], msg["parts"]))
+    return results
 
-        await asyncio.Future()  # keep alive
+async def scrape_youtube(page):
+    messages = await page.evaluate("""() => {
+        const items = [];
+        document.querySelectorAll('#items #message').forEach(el => {
+            const userEl = el.closest('#content').querySelector('#author-name');
+            if (!userEl) return;
+            items.push({
+                id: el.closest('yt-live-chat-text-message-renderer').getAttribute('id'),
+                username: userEl.textContent.trim(),
+                text: el.textContent.trim()
+            });
+        });
+        return items;
+    }""")
 
+    results = []
+    for msg in messages:
+        if msg["id"] in seen_messages:
+            continue
+        seen_messages.add(msg["id"])
+        results.append(format_youtube(msg["username"], msg["text"]))
+    return results
+
+async def scrape_facebook(page):
+    messages = await page.evaluate("""() => {
+        const items = [];
+        document.querySelectorAll('div[data-from]').forEach(el => {
+            const nameEl = el.querySelector('.name');
+            const msgEl = el.querySelector('.message');
+            if (!nameEl || !msgEl) return;
+
+            items.push({
+                id: el.getAttribute("data-id"),
+                username: nameEl.textContent.trim(),
+                text: msgEl.textContent.trim()
+            });
+        });
+        return items;
+    }""")
+
+    results = []
+    for msg in messages:
+        if msg["id"] in seen_messages:
+            continue
+        seen_messages.add(msg["id"])
+        results.append(format_facebook(msg["username"], msg["text"]))
+    return results
+
+# ==============================
+# Main Runner
+# ==============================
+async def run():
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+
+        pages = {}
+        if KICK_CHAT_URL:
+            pages["kick"] = await browser.new_page()
+            await pages["kick"].goto(KICK_CHAT_URL, wait_until="domcontentloaded")
+            print("✅ Connected to Kick chat")
+        if YOUTUBE_CHAT_URL:
+            pages["yt"] = await browser.new_page()
+            await pages["yt"].goto(YOUTUBE_CHAT_URL, wait_until="domcontentloaded")
+            print("✅ Connected to YouTube chat")
+        if FB_WIDGET_URL:
+            pages["fb"] = await browser.new_page()
+            await pages["fb"].goto(FB_WIDGET_URL, wait_until="domcontentloaded")
+            print("✅ Connected to Facebook widget")
+
+        while True:
+            if "kick" in pages:
+                msgs = await scrape_kick(pages["kick"])
+                for m in msgs:
+                    await send_to_ntfy(m)
+
+            if "yt" in pages:
+                msgs = await scrape_youtube(pages["yt"])
+                for m in msgs:
+                    await send_to_ntfy(m)
+
+            if "fb" in pages:
+                msgs = await scrape_facebook(pages["fb"])
+                for m in msgs:
+                    await send_to_ntfy(m)
+
+            await asyncio.sleep(1)
 
 async def main():
-    if not CHAT_URL:
-        raise RuntimeError("CHAT_URL environment variable is required")
     await run()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

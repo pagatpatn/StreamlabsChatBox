@@ -1,26 +1,32 @@
 # --------------------------
 # Base image
 # --------------------------
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 # --------------------------
-# Environment variables
+# Install system dependencies
 # --------------------------
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-
-# --------------------------
-# Install system dependencies for Chromium/Playwright + build tools
-# --------------------------
-RUN apt-get update && apt-get install -y \
-    wget curl gnupg \
-    build-essential python3-dev \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcb1 libxcomposite1 \
-    libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libgtk-3-0 \
-    fonts-liberation libappindicator3-1 libxss1 xdg-utils \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y \
+        gcc \
+        g++ \
+        curl \
+        libnss3 \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libcups2 \
+        libdrm2 \
+        libxkbcommon0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxrandr2 \
+        libgbm1 \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libgtk-3-0 \
+        wget \
+        unzip \
+        && rm -rf /var/lib/apt/lists/*
 
 # --------------------------
 # Set working directory
@@ -28,22 +34,24 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # --------------------------
-# Copy requirements and install Python deps
+# Copy requirements and install Python packages
 # --------------------------
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Force greenlet to 3.0.3 (compatible with Python 3.12)
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
 # --------------------------
 # Install Playwright browsers
 # --------------------------
-RUN playwright install --with-deps
+RUN playwright install
 
 # --------------------------
-# Copy the app code
+# Copy your application code
 # --------------------------
 COPY . .
 
 # --------------------------
-# Entrypoint
+# Set entrypoint
 # --------------------------
 CMD ["python", "main.py"]

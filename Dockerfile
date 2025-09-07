@@ -1,29 +1,40 @@
-# Use official Python slim image
+# -----------------------------
+# Base image with Python 3.12
+# -----------------------------
 FROM python:3.12-slim
 
+# -----------------------------
 # Set working directory
+# -----------------------------
 WORKDIR /app
 
-# Install system dependencies for Playwright
-RUN apt-get update && apt-get install -y \
-    wget curl gnupg ca-certificates fonts-liberation libnss3 \
-    libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libatk1.0-0 \
-    libcups2 libdrm2 libgbm1 libasound2 libpangocairo-1.0-0 \
-    libxshmfence1 libglib2.0-0 libxrender1 libjpeg62-turbo \
-    libpng16-16 libwebp6 libvpx6 libfreetype6 libharfbuzz0b \
-    libfribidi0 libicu70 libssl1.1 ttf-ubuntu-font-family ttf-unifont \
-    && rm -rf /var/lib/apt/lists/*
+# -----------------------------
+# Copy local files
+# -----------------------------
+COPY . /app
 
-# Copy requirements and install Python deps
-COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt
+# -----------------------------
+# Upgrade pip + install dependencies
+# -----------------------------
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
+# -----------------------------
 # Install Playwright browsers
-RUN python -m playwright install
+# -----------------------------
+RUN playwright install chromium
 
-# Copy your script
-COPY . .
+# -----------------------------
+# Expose optional port (not needed for ntfy)
+# -----------------------------
+# EXPOSE 8000
 
+# -----------------------------
+# Set environment variable to avoid sandbox issues
+# -----------------------------
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# -----------------------------
 # Run the script
+# -----------------------------
 CMD ["python", "str.py"]

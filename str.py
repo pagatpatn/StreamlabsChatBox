@@ -11,9 +11,10 @@ DEDUP_WINDOW = 5
 MAX_LEN = 123
 POLL_INTERVAL = 0.5  # seconds
 
-recent_msgs = {}        
+recent_msgs = {}
 send_queue = asyncio.Queue()
 
+# ---------- Enqueue with dedup + splitting ----------
 async def enqueue_message(platform: str, user: str, message: str):
     now = time.time()
     key = f"{platform}:{user}:{message}"
@@ -34,6 +35,7 @@ async def enqueue_message(platform: str, user: str, message: str):
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         await send_queue.put((platform, user, chunk + suffix))
 
+# ---------- Worker that POSTs to ntfy ----------
 async def ntfy_worker():
     while True:
         platform, user, msg = await send_queue.get()
@@ -50,6 +52,7 @@ async def ntfy_worker():
         await asyncio.sleep(SEND_DELAY)
         send_queue.task_done()
 
+# ---------- Browser + DOM observer + polling ----------
 async def run_browser():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -65,7 +68,7 @@ async def run_browser():
         except Exception:
             print("❌ #log not found within timeout; widget might not have loaded.")
 
-        print("📡 Chat widget loaded — starting polling...")
+        print("📡 Chat widget loaded — attaching observer + starting polling...")
 
         async def on_new_message(user, message, platform):
             if message and message.strip():
@@ -77,8 +80,63 @@ async def run_browser():
             payload.get("platform", "Kick")
         ))
 
+        # --- Track seen nodes for polling ---
         seen_nodes = set()
 
+        # --- Inject JS for MutationObserver ---
+        await page.evaluate("""
+            (() => {
+                function safeNameFromUrl(url) {
+                    try { return url.split('/').pop().split('?')[0].split('.')[0].replace(/[^a-zA-Z0-9_-]+/g, ''); }
+                    catch (e) { return 'EMOTE'; }
+                }
+
+                function extractMessage(node) {
+                    if (!node) return '';
+                    const parts = [];
+                    node.childNodes.forEach(child => {
+                        if (child.nodeType === Node.TEXT_NODE) parts.push(child.textContent);
+                        else if (child.nodeType === 1) {
+                            if (child.classList && child.classList.contains('emote')) {
+                                const img = child.querySelector('img');
+                                if (img) parts.push(img.alt?.trim() || ':KEKW:');
+                            } else parts.push(child.textContent || '');
+                        }
+                    });
+                    return parts.join('').trim();
+                }
+
+                function detectPlatform(node) {
+                    if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
+                    if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
+                    if (node.querySelector("img.platform-icon[src*='twitch']")) return "Twitch";
+                    if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
+                    return "Facebook";
+                }
+
+                function processNode(node) {
+                    try {
+                        if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
+                        const user = node.dataset.from;
+                        const msgNode = node.querySelector('.message');
+                        const msg = extractMessage(msgNode);
+                        const platform = detectPlatform(node);
+                        if (msg) window.onNewMessage({user, message: msg, platform});
+                    } catch(e) {}
+                }
+
+                const log = document.querySelector('#log');
+                if (!log) return;
+                log.querySelectorAll('div[data-from]').forEach(processNode);
+
+                const observer = new MutationObserver(muts => {
+                    muts.forEach(m => m.addedNodes.forEach(n => processNode(n)));
+                });
+                observer.observe(log, { childList: true });
+            })();
+        """)
+
+        # --- Polling loop for backup (catches missed Kick messages) ---
         while True:
             nodes = await page.query_selector_all("div[data-from]")
             for node in nodes:
@@ -103,6 +161,7 @@ async def run_browser():
 
             await asyncio.sleep(POLL_INTERVAL)
 
+# ---------- main ----------
 async def main():
     worker = asyncio.create_task(ntfy_worker())
     try:

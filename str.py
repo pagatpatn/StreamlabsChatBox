@@ -1,236 +1,150 @@
 import os
 import asyncio
 import requests
-import time
+import math
 from playwright.async_api import async_playwright
 
-# ================= CONFIG =================
-CHAT_URL = "https://streamlabs.com/widgets/chat-box/v1/C6DC1A891DE65F9C4C81C602868ED61C59018D9968330B8B781FA78E095E4A00589BCD3A6BF64B604F9742C6F0B84CCC38884FE4523AC3FFE45812E581444282E462DB432308C0D969F72078093D6B2CFBB49DA03E30676954BB802F25B748ED1208B0E76480F15014408FA3F09FED292ECA427F16820E876BD961E69A"
+# =====================================================
+# --- Config (use Railway ENV vars for security) ---
+# =====================================================
+CHAT_URL = os.getenv("CHAT_URL")  # must be set in Railway
 NTFY_URL = os.getenv("NTFY_URL", "https://ntfy.sh/streamchats123")
-  # put your ntfy topic here
-SEND_DELAY = 5          # seconds between sending each queued message
-DEDUP_WINDOW = 5        # seconds to suppress duplicate messages
-MAX_LEN = 123           # chunk length before splitting
+DEDUP_CACHE_SIZE = 20  # keep last 20 messages for spam filtering
+MAX_LEN = 123  # max chars per ntfy message
+SEND_DELAY = 5  # seconds between each message to ntfy
 
-# simple dedup store and send queue
-recent_msgs = {}        # { key: timestamp }
-send_queue = asyncio.Queue()
+recent_msgs = []
 
 
-# ---------- Enqueue (with dedup + splitting) ----------
-async def enqueue_message(platform: str, user: str, message: str):
-    """Check dedup then split message into chunks and enqueue them."""
-    now = time.time()
-    key = f"{platform}:{user}:{message}"
-    # dedup by time window
-    if key in recent_msgs and now - recent_msgs[key] < DEDUP_WINDOW:
-        # skip duplicate
+async def send_to_ntfy(user, message, platform="Chat"):
+    """Send message(s) to ntfy with dedup + splitting + delay"""
+    global recent_msgs
+    key = f"{user}:{message}"
+
+    if key in recent_msgs:
         return
-    recent_msgs[key] = now
 
-    # cleanup old dedup entries
-    for k in list(recent_msgs.keys()):
-        if now - recent_msgs[k] > DEDUP_WINDOW:
-            del recent_msgs[k]
+    recent_msgs.append(key)
+    if len(recent_msgs) > DEDUP_CACHE_SIZE:
+        recent_msgs.pop(0)
 
-    # split long messages
+    # Split long messages
     if len(message) <= MAX_LEN:
         chunks = [message]
     else:
         chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)]
 
-    total = len(chunks)
-    for idx, chunk in enumerate(chunks, start=1):
-        suffix = f" [{idx}/{total}]" if total > 1 else ""
-        await send_queue.put((platform, user, chunk + suffix))
+    total_parts = len(chunks)
 
-
-# ---------- Worker that actually POSTs to ntfy (rate-limited) ----------
-async def ntfy_worker():
-    while True:
-        platform, user, msg = await send_queue.get()
+    for i, chunk in enumerate(chunks, start=1):
+        suffix = f" [{i}/{total_parts}]" if total_parts > 1 else ""
         try:
-            # run blocking requests.post off the event loop
-            await asyncio.to_thread(
-                requests.post,
+            requests.post(
                 NTFY_URL,
-                data=msg.encode("utf-8"),
+                data=(chunk + suffix).encode("utf-8"),
                 headers={"Title": f"[{platform}] {user}"}
             )
-            print(f"✅ Sent to ntfy: [{platform}] {user}: {msg}")
+            print(f"✅ Sent to ntfy: [{platform}] {user}: {chunk}{suffix}")
         except Exception as e:
             print(f"❌ Failed to send to ntfy: {e}")
-        # global send delay between every queued message
+
+        # Wait SEND_DELAY seconds between all messages (split or not)
         await asyncio.sleep(SEND_DELAY)
-        send_queue.task_done()
 
 
-# ---------- Browser + DOM observer ----------
-async def run_browser():
+async def run():
     async with async_playwright() as p:
-        # Stealth headful rendering off-screen so Kick renders but you don't see a window
         browser = await p.chromium.launch(
-            headless=False,
+            headless=True,  # must be True for Railway
             args=[
-                "--window-position=-32000,-32000",
-                "--disable-gpu",
                 "--disable-dev-shm-usage",
-                "--disable-software-rasterizer",
                 "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-accelerated-2d-canvas",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-blink-features=AutomationControlled",
-            ],
+                "--disable-gpu",
+                "--disable-software-rasterizer"
+            ]
         )
-
         page = await browser.new_page()
-        # optional: set viewport size to something wide so widget renders properly
-        await page.set_viewport_size({"width": 1280, "height": 800})
+        await page.goto(CHAT_URL)
 
-        await page.goto(CHAT_URL, wait_until="domcontentloaded")
+        print("📡 Capturing chat messages from #log...")
 
-        # wait for #log to appear (gives time for widget to initialize)
-        try:
-            await page.wait_for_selector("#log", timeout=30000)
-        except Exception:
-            print("❌ #log not found within timeout; widget might not have loaded.")
-            # keep running for debugging or exit
-            # await browser.close()
-            # return
+        async def on_message(_, data):
+            user = data.get("user", "Unknown")
+            message = data.get("message", "")
+            platform = data.get("platform", "Chat")
+            if message.strip():
+                await send_to_ntfy(user, message, platform)
 
-        print("📡 Chat widget loaded — attaching observer...")
+        await page.expose_binding("onNewMessage", on_message)
 
-        # binding callback that the page will call
-        async def on_new_message(_source, payload):
-            # payload is expected to be dict: { user, message, platform }
-            user = payload.get("user", "Unknown")
-            message = payload.get("message", "")
-            platform = payload.get("platform", "Facebook")
-            if message and message.strip():
-                await enqueue_message(platform, user, message)
-
-        await page.expose_binding("onNewMessage", on_new_message)
-
-        # Inject JS (IIFE) — extracts text + custom emotes fallback to [NAME]
-        await page.evaluate(
-            """
-            (() => {
-                function safeNameFromUrl(url) {
-                    try {
-                        const last = url.split('/').pop().split('?')[0];
-                        const base = last.split('.')[0] || 'EMOTE';
-                        return base.replace(/[^a-zA-Z0-9_-]+/g, '');
-                    } catch (e) {
-                        return 'EMOTE';
-                    }
-                }
-
+        # JS observer: capture messages + fallback emote handling
+        await page.evaluate(r"""
+            const log = document.querySelector('#log');
+            if (log) {
                 function extractMessage(node) {
-    if (!node) return '';
-    const parts = [];
-    node.childNodes.forEach(child => {
-        if (child.nodeType === Node.TEXT_NODE) {
-            parts.push(child.textContent);
-        } else if (child.nodeType === 1) {
-            if (child.classList && child.classList.contains('emote')) {
-                const img = child.querySelector('img');
-                if (img) {
-                    let alt = (img.alt || '').trim();
-                    if (alt) {
-                        parts.push(alt);  // YouTube/Twitch/FB usually have this
-                    } else {
-                        // Fallback: derive from filename
-                        let fname = (img.src || '').split('/').pop().split('?')[0];
-                        fname = fname.split('.')[0];  // remove extension
-                        if (fname.toLowerCase() === 'fullsize') {
-                            // Kick sometimes uses "fullsize.png" – replace with :EMOTE:
-                            parts.push(':KEKW:');  // default fallback if no better info
+                    let parts = [];
+                    node.querySelectorAll('.message *').forEach(el => {
+                        if (el.tagName === "IMG" && el.classList.contains("emote")) {
+                            // Try fallback text from alt or filename
+                            let alt = el.getAttribute("alt") || "";
+                            if (!alt) {
+                                let src = el.getAttribute("src") || "";
+                                let match = src.match(/\/([^\/]+)\.[a-z]+$/i);
+                                alt = match ? match[1] : "emote";
+                            }
+                            parts.push(`:${alt.toUpperCase()}:`);
                         } else {
-                            parts.push(':' + fname.toUpperCase() + ':');
+                            parts.push(el.textContent);
                         }
+                    });
+                    // If no nested children, fallback to textContent
+                    if (parts.length === 0) {
+                        parts.push(node.querySelector('.message')?.innerText.trim() || "");
                     }
-                }
-            } else if (child.tagName === 'IMG' && child.classList.contains('emote')) {
-                const img = child;
-                let alt = (img.alt || '').trim();
-                if (alt) {
-                    parts.push(alt);
-                } else {
-                    let fname = (img.src || '').split('/').pop().split('?')[0];
-                    fname = fname.split('.')[0];
-                    if (fname.toLowerCase() === 'fullsize') {
-                        parts.push(':KEKW:');
-                    } else {
-                        parts.push(':' + fname.toUpperCase() + ':');
-                    }
-                }
-            } else {
-                parts.push(child.textContent || '');
-            }
-        }
-    });
-    return parts.join('').trim();
-}
-
-                function detectPlatform(node) {
-                    // look for platform icon inside the message row
-                    if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
-                    if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
-                    if (node.querySelector("img.platform-icon[src*='twitch']")) return "Twitch";
-                    if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
-                    return "Facebook"; // safe default
+                    return parts.join(" ").trim();
                 }
 
-                function processNode(node) {
-                    try {
-                        if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
-                        const user = node.dataset.from;
-                        const msgNode = node.querySelector('.message');
-                        const msg = extractMessage(msgNode);
-                        const platform = detectPlatform(node);
-                        if (msg) window.onNewMessage({user: user, message: msg, platform: platform});
-                    } catch (e) {
-                        // ignore per-message errors
-                    }
-                }
+                // Capture existing messages
+                log.querySelectorAll('div[data-from]').forEach(node => {
+                    const user = node.dataset.from;
+                    const msg = extractMessage(node);
+                    let platform = "Facebook"; // default
+                    if (node.querySelector("img.platform-icon[src*='kick']")) platform = "Kick";
+                    if (node.querySelector("img.platform-icon[src*='youtube']")) platform = "YouTube";
+                    if (node.querySelector("img.platform-icon[src*='twitch']")) platform = "Twitch";
+                    if (msg) window.onNewMessage({user, message: msg, platform});
+                });
 
-                const log = document.querySelector('#log');
-                if (!log) {
-                    console.log('#log not found');
-                    return;
-                }
-
-                // capture existing messages immediately (incl. first)
-                log.querySelectorAll('div[data-from]').forEach(processNode);
-
-                // observe new messages
+                // Observe new messages
                 const observer = new MutationObserver(muts => {
                     for (const m of muts) {
-                        for (const n of m.addedNodes) {
-                            processNode(n);
+                        for (const node of m.addedNodes) {
+                            if (node.nodeType === 1 && node.dataset.from) {
+                                const user = node.dataset.from;
+                                const msg = extractMessage(node);
+                                let platform = "Facebook"; // default
+                                if (node.querySelector("img.platform-icon[src*='kick']")) platform = "Kick";
+                                if (node.querySelector("img.platform-icon[src*='youtube']")) platform = "YouTube";
+                                if (node.querySelector("img.platform-icon[src*='twitch']")) platform = "Twitch";
+                                if (msg) window.onNewMessage({user, message: msg, platform});
+                            }
                         }
                     }
                 });
                 observer.observe(log, { childList: true });
-                console.log('✅ Chat observer attached (with emote fallback)');
-            })();
-            """
-        )
+                console.log("✅ Chat observer attached to #log");
+            } else {
+                console.log("❌ #log not found");
+            }
+        """)
 
-        # keep page running
-        await asyncio.Future()
+        await asyncio.Future()  # keep alive
 
 
-# ---------- main ----------
 async def main():
-    # start ntfy worker
-    worker = asyncio.create_task(ntfy_worker())
-    # start browser (this blocks indefinitely)
-    try:
-        await run_browser()
-    finally:
-        worker.cancel()
+    if not CHAT_URL:
+        raise RuntimeError("CHAT_URL environment variable is required")
+    await run()
 
 
 if __name__ == "__main__":

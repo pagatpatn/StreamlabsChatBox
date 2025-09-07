@@ -5,20 +5,24 @@ from playwright.async_api import async_playwright
 
 # ================= CONFIG =================
 CHAT_URL = "https://streamlabs.com/widgets/chat-box/v1/C6DC1A891DE65F9C4C81C602868ED61C59018D9968330B8B781FA78E095E4A00589BCD3A6BF64B604F9742C6F0B84CCC38884FE4523AC3FFE45812E581444282E462DB432308C0D969F72078093D6B2CFBB49DA03E30676954BB802F25B748ED1208B0E76480F15014408FA3F09FED292ECA427F16820E876BD961E69A"
-NTFY_URL = "https://ntfy.sh/streamchats123"  # put your ntfy topic here
-SEND_DELAY = 5          # seconds between sending each queued message
-DEDUP_WINDOW = 5        # seconds to suppress duplicate messages
-MAX_LEN = 123           # chunk length before splitting
+NTFY_URL = "https://ntfy.sh/streamchats123"
+SEND_DELAY = 5
+DEDUP_WINDOW = 5
+MAX_LEN = 123
 
-# simple dedup store and send queue
-recent_msgs = {}        # { key: timestamp }
+recent_msgs = {}   # { key: timestamp }
+seen_ids = set()   # for dedup by data-id
 send_queue = asyncio.Queue()
 
 
 # ---------- Enqueue (with dedup + splitting) ----------
-async def enqueue_message(platform: str, user: str, message: str):
+async def enqueue_message(platform: str, user: str, message: str, msg_id: str):
+    if msg_id in seen_ids:
+        return
+    seen_ids.add(msg_id)
+
     now = time.time()
-    key = f"{platform}:{user}:{message.strip()}"
+    key = f"{platform}:{user}:{message}"
     if key in recent_msgs and now - recent_msgs[key] < DEDUP_WINDOW:
         return
     recent_msgs[key] = now
@@ -63,10 +67,7 @@ async def run_browser():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-            ],
+            args=["--no-sandbox", "--disable-setuid-sandbox"],
         )
 
         page = await browser.new_page()
@@ -84,60 +85,69 @@ async def run_browser():
             user = payload.get("user", "Unknown")
             message = payload.get("message", "")
             platform = payload.get("platform", "Facebook")
-            if message and message.strip():
-                await enqueue_message(platform, user, message)
+            msg_id = payload.get("id", "")
+            if message and message.strip() and msg_id:
+                await enqueue_message(platform, user, message, msg_id)
 
         await page.expose_binding("onNewMessage", on_new_message)
 
         await page.evaluate(
-    """
-    (() => {
-        function processNode(node) {
-            try {
-                if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
-
-                // Detect platform
-                let platform = "Facebook"; // default
-                const icon = node.querySelector("img.platform-icon");
-                if (icon) {
-                    const src = icon.getAttribute("src") || "";
-                    if (src.includes("kick")) platform = "Kick";
-                    else if (src.includes("youtube")) platform = "YouTube";
-                    else if (src.includes("twitch")) platform = "Twitch";
+            """
+            (() => {
+                function extractMessage(node) {
+                    if (!node) return '';
+                    const parts = [];
+                    node.childNodes.forEach(child => {
+                        if (child.nodeType === Node.TEXT_NODE) {
+                            parts.push(child.textContent);
+                        } else if (child.nodeType === 1) {
+                            if (child.classList && child.classList.contains('emote')) {
+                                const img = child.querySelector('img');
+                                if (img) {
+                                    let alt = (img.alt || '').trim();
+                                    parts.push(alt || ':KEKW:');
+                                }
+                            } else {
+                                parts.push(child.textContent || '');
+                            }
+                        }
+                    });
+                    return parts.join('').trim();
                 }
 
-                // Get user and message
-                const userSpan = node.querySelector("span.name");
-                const msgSpan = node.querySelector("span.message");
-                if (!userSpan || !msgSpan) return;
-
-                const user = userSpan.textContent.trim();
-                const msg = msgSpan.textContent.trim();
-                if (msg) {
-                    window.onNewMessage({user, message: msg, platform});
-                    if (platform === "Kick") {
-                        console.log("🟣 New Kick message:", user, msg);
-                    }
+                function detectPlatform(node) {
+                    if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
+                    if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
+                    if (node.querySelector("img.platform-icon[src*='twitch']")) return "Twitch";
+                    if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
+                    return "Facebook";
                 }
-            } catch (e) {}
-        }
 
-        const log = document.querySelector('#log');
-        if (!log) { console.log('#log not found'); return; }
+                function processNode(node) {
+                    try {
+                        if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
+                        const user = node.dataset.from;
+                        const msgNode = node.querySelector('.message');
+                        const msg = extractMessage(msgNode);
+                        const platform = detectPlatform(node);
+                        const id = node.dataset.id;
+                        if (msg && id) window.onNewMessage({user, message: msg, platform, id});
+                    } catch (e) {}
+                }
 
-        // Capture existing messages
-        log.querySelectorAll('div[data-from]').forEach(processNode);
+                const log = document.querySelector('#log');
+                if (!log) { console.log('#log not found'); return; }
 
-        // Observe new messages
-        const observer = new MutationObserver(muts => {
-            for (const m of muts) for (const n of m.addedNodes) processNode(n);
-        });
-        observer.observe(log, { childList: true });
-        console.log('✅ Chat observer attached (with emote fallback)');
-    })();
-    """
-)
+                log.querySelectorAll('div[data-from]').forEach(processNode);
 
+                const observer = new MutationObserver(muts => {
+                    for (const m of muts) for (const n of m.addedNodes) processNode(n);
+                });
+                observer.observe(log, { childList: true });
+                console.log('✅ Chat observer attached (with emote fallback)');
+            })();
+            """
+        )
 
         await asyncio.Future()
 

@@ -90,48 +90,54 @@ async def run_browser():
         await page.expose_binding("onNewMessage", on_new_message)
 
         await page.evaluate(
-            """
-            (() => {
-                function processNode(node) {
-                    try {
-                        if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
+    """
+    (() => {
+        function processNode(node) {
+            try {
+                if (!node || node.nodeType !== 1 || !node.dataset || !node.dataset.from) return;
 
-                        // Detect platform
-                        let platform = "Facebook"; // default
-                        const icon = node.querySelector("img.platform-icon");
-                        if (icon) {
-                            const src = icon.getAttribute("src") || "";
-                            if (src.includes("kick")) platform = "Kick";
-                            else if (src.includes("youtube")) platform = "YouTube";
-                            else if (src.includes("twitch")) platform = "Twitch";
-                        }
-
-                        // Get user and message
-                        const userSpan = node.querySelector("span.name");
-                        const msgSpan = node.querySelector("span.message");
-                        if (!userSpan || !msgSpan) return;
-
-                        const user = userSpan.textContent.trim();
-                        const msg = msgSpan.textContent.trim();
-                        if (msg) window.onNewMessage({user, message: msg, platform});
-                    } catch (e) {}
+                // Detect platform
+                let platform = "Facebook"; // default
+                const icon = node.querySelector("img.platform-icon");
+                if (icon) {
+                    const src = icon.getAttribute("src") || "";
+                    if (src.includes("kick")) platform = "Kick";
+                    else if (src.includes("youtube")) platform = "YouTube";
+                    else if (src.includes("twitch")) platform = "Twitch";
                 }
 
-                const log = document.querySelector('#log');
-                if (!log) { console.log('#log not found'); return; }
+                // Get user and message
+                const userSpan = node.querySelector("span.name");
+                const msgSpan = node.querySelector("span.message");
+                if (!userSpan || !msgSpan) return;
 
-                // Capture existing messages
-                log.querySelectorAll('div[data-from]').forEach(processNode);
+                const user = userSpan.textContent.trim();
+                const msg = msgSpan.textContent.trim();
+                if (msg) {
+                    window.onNewMessage({user, message: msg, platform});
+                    if (platform === "Kick") {
+                        console.log("🟣 New Kick message:", user, msg);
+                    }
+                }
+            } catch (e) {}
+        }
 
-                // Observe new messages
-                const observer = new MutationObserver(muts => {
-                    for (const m of muts) for (const n of m.addedNodes) processNode(n);
-                });
-                observer.observe(log, { childList: true });
-                console.log('✅ Chat observer attached (with emote fallback)');
-            })();
-            """
-        )
+        const log = document.querySelector('#log');
+        if (!log) { console.log('#log not found'); return; }
+
+        // Capture existing messages
+        log.querySelectorAll('div[data-from]').forEach(processNode);
+
+        // Observe new messages
+        const observer = new MutationObserver(muts => {
+            for (const m of muts) for (const n of m.addedNodes) processNode(n);
+        });
+        observer.observe(log, { childList: true });
+        console.log('✅ Chat observer attached (with emote fallback)');
+    })();
+    """
+)
+
 
         await asyncio.Future()
 

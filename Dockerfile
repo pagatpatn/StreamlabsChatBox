@@ -4,7 +4,7 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for Playwright + building packages
+# Install minimal system dependencies for Playwright + building Python packages
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -36,11 +36,11 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install
+# Install only Chromium browser (lighter than full Playwright)
+RUN playwright install chromium
 
 # Copy app code
 COPY . .
 
-# Set default command (adjust as needed)
+# Set default command
 CMD ["python", "main.py"]

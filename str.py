@@ -37,23 +37,31 @@ recent_msgs = {}
 send_queue = asyncio.Queue()
 
 async def enqueue_message(platform: str, user: str, message: str):
+    """Queue a message for sending, with anti-spam dedup across all platforms."""
     now = time.time()
+    # Use platform+user+message as key
     key = f"{platform}:{user}:{message}"
-    if key in recent_msgs and now - recent_msgs[key] < DEDUP_WINDOW:
+
+    # If the same message was sent recently, skip
+    last_sent = recent_msgs.get(key)
+    if last_sent and now - last_sent < DEDUP_WINDOW:
         return
+
+    # Update the last sent timestamp
     recent_msgs[key] = now
 
-    # cleanup old dedup entries
-    for k in list(recent_msgs.keys()):
-        if now - recent_msgs[k] > DEDUP_WINDOW:
+    # Cleanup old dedup entries
+    for k, t in list(recent_msgs.items()):
+        if now - t > DEDUP_WINDOW * 2:  # double the window for cleanup
             del recent_msgs[k]
 
-    # split long messages
+    # Split long messages
     chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)] if len(message) > MAX_LEN else [message]
     total = len(chunks)
     for idx, chunk in enumerate(chunks, start=1):
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         await send_queue.put((platform, user, chunk + suffix))
+
 
 async def ntfy_worker():
     while True:

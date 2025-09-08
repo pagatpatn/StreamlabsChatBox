@@ -90,8 +90,8 @@ async def poll_kick_chat():
 
     while True:
         try:
-            past_time = datetime.utcnow() - timedelta(minutes=TIME_WINDOW_MINUTES)
-            formatted_time = past_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            past_time = datetime.now(timezone.utc) - timedelta(minutes=TIME_WINDOW_MINUTES)
+formatted_time = past_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             chat = kick_api.chat(channel.id, formatted_time)
             messages = []
 

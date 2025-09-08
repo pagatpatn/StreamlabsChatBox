@@ -3,6 +3,7 @@ import requests
 import time
 from playwright.async_api import async_playwright
 
+
 # ================= CONFIG =================
 CHAT_URL = "https://streamlabs.com/widgets/chat-box/v1/C6DC1A891DE65F9C4C81C602868ED61C59018D9968330B8B781FA78E095E4A00589BCD3A6BF64B604F9742C6F0B84CCC38884FE4523AC3FFE45812E581444282E462DB432308C0D969F72078093D6B2CFBB49DA03E30676954BB802F25B748ED1208B0E76480F15014408FA3F09FED292ECA427F16820E876BD961E69A"
 NTFY_URL = "https://ntfy.sh/streamchats123"  # put your ntfy topic here
@@ -14,11 +15,11 @@ MAX_LEN = 123           # chunk length before splitting
 recent_msgs = {}        # { key: timestamp }
 send_queue = asyncio.Queue()
 
+
 # ---------- Enqueue (with dedup + splitting) ----------
-async def enqueue_message(platform: str, user: str, message: str, msg_id: str):
-    """Check dedup by message id then split message into chunks and enqueue them."""
+async def enqueue_message(platform: str, user: str, message: str):
     now = time.time()
-    key = f"{platform}:{user}:{msg_id}"  # use unique id to prevent repeated sending
+    key = f"{platform}:{user}:{message}"
     if key in recent_msgs and now - recent_msgs[key] < DEDUP_WINDOW:
         return
     recent_msgs[key] = now
@@ -39,6 +40,7 @@ async def enqueue_message(platform: str, user: str, message: str, msg_id: str):
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         await send_queue.put((platform, user, chunk + suffix))
 
+
 # ---------- Worker that actually POSTs to ntfy ----------
 async def ntfy_worker():
     while True:
@@ -55,6 +57,7 @@ async def ntfy_worker():
             print(f"❌ Failed to send to ntfy: {e}")
         await asyncio.sleep(SEND_DELAY)
         send_queue.task_done()
+
 
 # ---------- Browser + DOM observer ----------
 async def run_browser():
@@ -79,19 +82,15 @@ async def run_browser():
 
         print("📡 Chat widget loaded — attaching observer...")
 
-        # ---------- Binding to receive new messages ----------
         async def on_new_message(_source, payload):
             user = payload.get("user", "Unknown")
             message = payload.get("message", "")
             platform = payload.get("platform", "Facebook")
-            msg_id = payload.get("id", "")
-            if message and message.strip() and msg_id:
-                print(f"🟢 New {platform} message detected: [{user}] {message}")
-                await enqueue_message(platform, user, message, msg_id)
+            if message and message.strip():
+                await enqueue_message(platform, user, message)
 
         await page.expose_binding("onNewMessage", on_new_message)
 
-        # ---------- Inject JS to watch DOM ----------
         await page.evaluate(
             """
             (() => {
@@ -140,11 +139,7 @@ async def run_browser():
                         const msgNode = node.querySelector('.message');
                         const msg = extractMessage(msgNode);
                         const platform = detectPlatform(node);
-                        const id = node.dataset.id;
-                        if (msg && id) {
-                            console.log(`🟢 [JS] New ${platform} message detected: [${user}] ${msg}`);
-                            window.onNewMessage({user, message: msg, platform, id});
-                        }
+                        if (msg) window.onNewMessage({user, message: msg, platform});
                     } catch (e) {}
                 }
 
@@ -162,7 +157,8 @@ async def run_browser():
             """
         )
 
-        await asyncio.Future()  # keep page running
+        await asyncio.Future()
+
 
 # ---------- main ----------
 async def main():
@@ -171,6 +167,7 @@ async def main():
         await run_browser()
     finally:
         worker.cancel()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

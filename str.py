@@ -91,6 +91,7 @@ async def run_browser():
 
         await page.expose_binding("onNewMessage", on_new_message)
 
+        # ---------------- JS injection ----------------
         await page.evaluate(
             """
             (() => {
@@ -124,12 +125,14 @@ async def run_browser():
                     return parts.join('').trim();
                 }
 
+                // ===== MODIFIED: detect Kick reliably =====
                 function detectPlatform(node) {
                     if (node.querySelector("img.platform-icon[src*='kick']")) return "Kick";
                     if (node.querySelector("img.platform-icon[src*='youtube']")) return "YouTube";
                     if (node.querySelector("img.platform-icon[src*='twitch']")) return "Twitch";
                     if (node.querySelector("img.platform-icon[src*='facebook']")) return "Facebook";
                     return "Facebook";
+                    return "Kick";  // default to Kick if none of the above
                 }
 
                 function processNode(node) {

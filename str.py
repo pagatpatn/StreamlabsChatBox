@@ -14,8 +14,8 @@ SEND_DELAY = int(os.getenv("MESSAGE_DELAY", 5))
 DEDUP_WINDOW = 5
 MAX_LEN = 123
 KICK_CHANNEL = os.getenv("KICK_CHANNEL", "default_channel")
-POLL_INTERVAL = 5
-TIME_WINDOW_MINUTES = 0.1
+POLL_INTERVAL = 1
+TIME_WINDOW_MINUTES = 0.01
 
 # --- Emoji Mapping ---
 EMOJI_MAP = {"GiftedYAY": "🎉", "ErectDance": "💃"}

@@ -73,7 +73,6 @@ async def ntfy_worker():
                 data=msg.encode("utf-8"),
                 headers={"Title": f"[{platform}] {user}"}
             )
-            print(f"✅ Sent to ntfy: [{platform}] {user}: {msg}")
         except Exception as e:
             print(f"❌ Failed to send to ntfy: {e}")
         await asyncio.sleep(SEND_DELAY)

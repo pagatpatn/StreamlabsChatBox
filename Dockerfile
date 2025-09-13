@@ -1,7 +1,7 @@
 # ----------------------------
 # Stage 1: Builder
 # ----------------------------
-FROM python:3.12-bookworm-slim AS builder
+FROM python:3.12-slim-bullseye
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

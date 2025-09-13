@@ -1,5 +1,5 @@
 # ----------------------------
-# Stage 1: Builder (installs Python deps + Playwright Chromium)
+# Stage 1: Builder
 # ----------------------------
 FROM python:3.12-slim-bullseye AS builder
 
@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps needed just to install & run Chromium once
+# Install Chromium runtime deps + basic tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates fonts-liberation \
       libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
@@ -17,17 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xdg-utils wget unzip git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements & install
 COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install playwright
 
-# Install ONLY Chromium (not all browsers)
-RUN playwright install --with-deps chromium
+# Install ONLY Chromium
+RUN playwright install chromium
 
 # ----------------------------
-# Stage 2: Runtime (slimmed down)
+# Stage 2: Runtime
 # ----------------------------
 FROM python:3.12-slim-bullseye
 
@@ -36,7 +35,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Minimal runtime libraries Chromium needs
+# Minimal runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
       libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
@@ -44,11 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Python deps & Playwright Chromium from builder
+# Copy Python deps + Chromium
 COPY --from=builder /usr/local /usr/local
+COPY --from=builder /root/.cache/ms-playwright /root/.cache/ms-playwright
 
-# Copy app files
+# Copy app
 COPY . .
 
-# Run script
 CMD ["python", "str.py"]

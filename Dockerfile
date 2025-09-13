@@ -2,7 +2,7 @@
 # Stage 1: Builder
 # ----------------------------
 FROM python:3.12-slim-bullseye AS builder
-
+ 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

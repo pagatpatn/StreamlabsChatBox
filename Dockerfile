@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 # ----------------------------
 # Install minimal Chromium
 # ----------------------------
-RUN playwright install --with-deps chromium --only-shell
+RUN playwright install --with-deps chromium
 
 # ----------------------------
 # Copy app source

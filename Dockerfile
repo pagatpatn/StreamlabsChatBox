@@ -1,19 +1,13 @@
 # ----------------------------
-# Base image
+# Stage 1: Builder
 # ----------------------------
-FROM python:3.12-slim
+FROM python:3.12-bookworm-slim AS builder
 
-# ----------------------------
-# Environment
-# ----------------------------
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# ----------------------------
-# System dependencies (minimal for Chromium)
-# ----------------------------
+# Install only essential system dependencies for Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
         libnss3 \
         libatk1.0-0 \
         libatk-bridge2.0-0 \
@@ -29,33 +23,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libappindicator3-1 \
         xdg-utils \
         wget \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# ----------------------------
 # Set workdir
-# ----------------------------
 WORKDIR /app
 
-# ----------------------------
-# Copy requirements
-# ----------------------------
+# Install Python deps
 COPY requirements.txt .
-
-# Upgrade pip & install dependencies
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r requirements.txt
 
-# ----------------------------
-# Install Chromium (no --with-deps)
-# ----------------------------
-RUN playwright install chromium
+# Install Playwright + Chromium only
+RUN pip install playwright && playwright install chromium
+
 
 # ----------------------------
-# Copy your script
+# Stage 2: Final runtime image
 # ----------------------------
+FROM python:3.12-bookworm-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Copy Chromium runtime deps from builder
+COPY --from=builder /usr/lib /usr/lib
+COPY --from=builder /usr/bin /usr/bin
+COPY --from=builder /usr/share /usr/share
+
+# Copy installed Python packages from builder
+COPY --from=builder /usr/local /usr/local
+
+# Set workdir
+WORKDIR /app
+
+# Copy app source
 COPY . .
 
-# ----------------------------
-# Run your script
-# ----------------------------
+# Default command
 CMD ["python", "str.py"]

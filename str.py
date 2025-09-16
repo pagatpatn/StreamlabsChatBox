@@ -3,9 +3,11 @@ import time
 import re
 import asyncio
 import requests
-from datetime import datetime, timedelta, timezone
-from kickapi import KickAPI
+from datetime import datetime
 from playwright.async_api import async_playwright
+import json
+import websockets
+import random
 
 # ================= CONFIG =================
 CHAT_URL = os.getenv("CHAT_URL")
@@ -13,9 +15,8 @@ NTFY_URL = os.getenv("NTFY_URL")
 SEND_DELAY = int(os.getenv("MESSAGE_DELAY", 5))
 DEDUP_WINDOW = 5
 MAX_LEN = 123
-KICK_CHANNEL = os.getenv("KICK_CHANNEL", "default_channel")
-POLL_INTERVAL = 1
-TIME_WINDOW_MINUTES = 0.01
+CHATROOM_ID = os.getenv("CHATROOM_ID")
+WS_URL = os.getenv("WS_URL")
 
 # --- Emoji Mapping ---
 EMOJI_MAP = {"GiftedYAY": "🎉", "ErectDance": "💃"}
@@ -27,45 +28,33 @@ def extract_emoji(text: str) -> str:
         text = text.replace(f"[emote:{emote_id}:{emote_name}]", EMOJI_MAP.get(emote_name, f"[{emote_name}]"))
     return text
 
-# --- Kick API Setup ---
-kick_api = KickAPI()
-if not KICK_CHANNEL:
-    raise ValueError("Please set KICK_CHANNEL environment variable")
-
 # ---------- Send Queue & Dedup ----------
 recent_msgs = {}
 send_queue = asyncio.Queue()
 
 async def enqueue_message(platform: str, user: str, message: str):
-    """Queue a message for sending, with anti-spam dedup across all platforms."""
     now = time.time()
-    # Use platform+user+message as key
     key = f"{platform}:{user}:{message}"
-
-    # If the same message was sent recently, skip
     last_sent = recent_msgs.get(key)
     if last_sent and now - last_sent < DEDUP_WINDOW:
         return
-
-    # Update the last sent timestamp
     recent_msgs[key] = now
-
-    # Cleanup old dedup entries
     for k, t in list(recent_msgs.items()):
-        if now - t > DEDUP_WINDOW * 2:  # double the window for cleanup
+        if now - t > DEDUP_WINDOW * 2:
             del recent_msgs[k]
 
-    # Split long messages
     chunks = [message[i:i+MAX_LEN] for i in range(0, len(message), MAX_LEN)] if len(message) > MAX_LEN else [message]
     total = len(chunks)
     for idx, chunk in enumerate(chunks, start=1):
         suffix = f" [{idx}/{total}]" if total > 1 else ""
         await send_queue.put((platform, user, chunk + suffix))
 
-
+# ---------- NTFY worker with FIFO and immediate first message ----------
 async def ntfy_worker():
+    first_message = True
     while True:
         platform, user, msg = await send_queue.get()
+
         try:
             await asyncio.to_thread(
                 requests.post,
@@ -75,41 +64,105 @@ async def ntfy_worker():
             )
         except Exception as e:
             print(f"❌ Failed to send to ntfy: {e}")
-        await asyncio.sleep(SEND_DELAY)
+
         send_queue.task_done()
 
-# ---------- Kick API Polling ----------
-async def poll_kick_chat():
-    channel = kick_api.channel(KICK_CHANNEL)
-    if not channel:
-        raise ValueError(f"Kick channel '{KICK_CHANNEL}' not found")
+        # Delay only if there are more messages waiting
+        if not send_queue.empty():
+            await asyncio.sleep(SEND_DELAY)
+        first_message = False
 
-    seen_ids = set()
-    while True:
+# ---------- Kick WebSocket ----------
+last_message_by_user = {}
+
+def split_message(text, limit=MAX_LEN):
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    for i in range(0, len(text), limit):
+        parts.append(text[i:i + limit])
+    total = len(parts)
+    return [f"{part} [{i+1}/{total}]" for i, part in enumerate(parts)]
+
+async def handle_kick_event(event):
+    event_type = event.get("event")
+    data = json.loads(event.get("data", "{}"))
+
+    if event_type == "App\\Events\\ChatMessageEvent":
+        user = data["sender"]["username"]
+        text = extract_emoji(data["content"])
+        if last_message_by_user.get(user) == text:
+            return
+        last_message_by_user[user] = text
+        parts = split_message(text)
+        for part in parts:
+            await enqueue_message("Kick", user, part)
+        print(f"[💬 {user}] {text}")
+
+    elif event_type == "App\\Events\\SubscriptionEvent":
+        user = data["user"]["username"]
+        months = data.get("months", 1)
+        msg = f"🎉 Subscribed for {months} month(s)!"
+        await enqueue_message("Kick", user, msg)
+        print(f"[⭐ SUB] {user} → {msg}")
+
+    elif event_type == "App\\Events\\GiftedSubEvent":
+        gifter = data["gifter"]["username"]
+        amount = data.get("gift_count", 1)
+        msg = f"🎁 Gifted {amount} sub(s)!"
+        await enqueue_message("Kick", gifter, msg)
+        print(f"[🎁 GIFT] {gifter} → {msg}")
+
+    elif event_type == "App\\Events\\TipEvent":
+        user = data["sender"]["username"]
+        amount = data.get("amount", 0)
+        currency = data.get("currency", "USD")
+        msg = f"💸 Tipped {amount} {currency}"
+        await enqueue_message("Kick", user, msg)
+        print(f"[💸 TIP] {user} → {msg}")
+
+    elif event_type == "App\\Events\\RaidEvent":
+        user = data["raider"]["username"]
+        viewers = data.get("viewer_count", 0)
+        msg = f"⚡ Raided with {viewers} viewers!"
+        await enqueue_message("Kick", user, msg)
+        print(f"[⚡ RAID] {user} → {msg}")
+
+    elif event_type == "App\\Events\\StickerEvent":
+        user = data["sender"]["username"]
+        sticker = data["sticker"]["name"]
+        msg = f"🌟 Sent sticker: {sticker}"
+        await enqueue_message("Kick", user, msg)
+        print(f"[🌟 STICKER] {user} → {msg}")
+
+async def listen_kick_websocket(chatroom_id):
+    async for ws in websockets.connect(WS_URL, ping_interval=20, ping_timeout=20):
         try:
-            past_time = datetime.now(timezone.utc) - timedelta(minutes=TIME_WINDOW_MINUTES)
-            formatted_time = past_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            chat = kick_api.chat(channel.id, formatted_time)
-            messages = []
+            print("✅ Connected to Kick chat WebSocket")
+            msg = await ws.recv()
+            data = json.loads(msg)
+            if data.get("event") == "pusher:connection_established":
+                subscribe_payload = {
+                    "event": "pusher:subscribe",
+                    "data": {
+                        "auth": "",
+                        "channel": f"chatrooms.{chatroom_id}.v2",
+                    },
+                }
+                await ws.send(json.dumps(subscribe_payload))
+                print(f"📡 Subscribed to chatroom {chatroom_id}")
+            async for message in ws:
+                try:
+                    event = json.loads(message)
+                    await handle_kick_event(event)
+                except Exception:
+                    pass
+        except Exception:
+            print("❌ Kick WS connection error, retrying...")
+        finally:
+            await asyncio.sleep(5)
 
-            if chat and hasattr(chat, "messages") and chat.messages:
-                for msg in chat.messages:
-                    message_text = extract_emoji(msg.text if hasattr(msg, "text") else "No text")
-                    msg_id = msg.id if hasattr(msg, "id") else f"{msg.sender.username}:{message_text}"
-                    if msg_id not in seen_ids:
-                        seen_ids.add(msg_id)
-                        messages.append((msg.sender.username, message_text))
-                        print(f"[Kick][{datetime.now().strftime('%H:%M:%S')}] {msg.sender.username}: {message_text}")
-
-            for user, text in messages:
-                await enqueue_message("Kick", user, text)
-
-        except Exception as e:
-            print(f"❌ Error fetching Kick chat: {e}")
-
-        await asyncio.sleep(POLL_INTERVAL)
-
-# ---------- Browser + DOM observer ----------
+# ---------- Browser + DOM observer (Streamlabs) ----------
 async def run_browser():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
@@ -178,13 +231,13 @@ async def run_browser():
 
 # ---------- main ----------
 async def main():
-    worker = asyncio.create_task(ntfy_worker())
-    kick_poll = asyncio.create_task(poll_kick_chat())
+    ntfy_worker_task = asyncio.create_task(ntfy_worker())
+    kick_ws_task = asyncio.create_task(listen_kick_websocket(CHATROOM_ID))
     try:
         await run_browser()
     finally:
-        worker.cancel()
-        kick_poll.cancel()
+        ntfy_worker_task.cancel()
+        kick_ws_task.cancel()
 
 if __name__ == "__main__":
     asyncio.run(main())
